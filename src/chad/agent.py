@@ -458,7 +458,7 @@ class Agent:
     def __init__(self, engine: BaseEngine, yolo: bool = False, max_steps: int = 40,
                  ctx_limit: int = 24000, mode: str = None, emit=None,
                  confirm=None, should_stop=None, drain_steering=None,
-                 thinking: bool = True,
+                 tool_event=None, thinking: bool = True,
                  max_gen_tokens: int = None, resume: list = None, persist: bool = False,
                  think_budget: int = None, think_ceiling: int = None,
                  turn_budget_tokens: int = None,
@@ -581,6 +581,11 @@ class Agent:
         # transcript (a pure append — the warm KV prefix stays valid) instead of
         # forcing interrupt + re-prefill. None (headless/bench) = off.
         self._drain_steering = drain_steering
+        # Structured tool boundary for programmatic front ends (see acp.py):
+        # tool_event(phase, name, args[, result]) with phase start/finish, fired
+        # around a real dispatch only. Best-effort: a raising callback must not
+        # break the turn, so _fire_tool_event guards it.
+        self._tool_event = tool_event
         # ATIF trajectory capture, off unless CHAD_TRAJECTORY_JSON is set.
         self._atif = atif.recorder()
         self._atif_seg = self._atif.new_segment() if self._atif else None
@@ -898,6 +903,18 @@ class Agent:
         warn = f"{C_RED}  ⚠ looks destructive — review carefully\n{C_RST}" if dangerous else ""
         ans = input(f"{C_YEL}  allow {name}:\n{preview}\n{warn}  approve? [y/N] {C_RST}").strip().lower()
         return ans in ("y", "yes")
+
+    def _fire_tool_event(self, phase, name, args, result=None) -> None:
+        # Invoke the structured tool hook without ever breaking the turn.
+        if self._tool_event is None:
+            return
+        try:
+            if result is None:
+                self._tool_event(phase, name, args)
+            else:
+                self._tool_event(phase, name, args, result)
+        except Exception as e:  # noqa: BLE001 - telemetry must never break a turn
+            log.warning("tool_event %s failed: %s", phase, e)
 
     def _atif_sync(self) -> None:
         """Rebuild this Agent's ATIF segment from `messages` and rewrite the document.
@@ -1576,6 +1593,7 @@ class Agent:
                     result = self._deny_reason or "[denied by user]"
                     self._deny_reason = None
                 else:
+                    self._fire_tool_event("start", name, args)
                     _t0 = time.perf_counter()
                     self.tool_dispatches += 1
                     # A snapshot happens AFTER approval, immediately before the tool
@@ -1611,6 +1629,7 @@ class Agent:
                     if _PREFILL_TRACE:
                         self._trace_tools_pending.append([name, round(_tool_s, 4)])
                 render_tool_result(self._emit, name, args, result)
+                self._fire_tool_event("finish", name, args, result)
                 log.info("TOOL %s(%s) -> %s [%.2fs]", name, args_preview(args),
                          result_preview(result), _tool_s)
                 self.messages.append({"role": "tool", "name": name, "content": result})

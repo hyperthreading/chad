@@ -1,0 +1,13 @@
+{
+  "name": "chad-acp-harness",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Official-client conformance harness for chad acp (ACP v1).",
+  "type": "module",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "dependencies": {
+    "@zed-industries/agent-client-protocol": "0.4.5"
+  }
+}

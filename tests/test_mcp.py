@@ -730,3 +730,62 @@ def test_stdio_env_extra_non_dict_ignored():
     spec = mcp._ServerSpec.decode({"command": "srv", "env": "not-a-dict"})
     env = mcp._stdio_env({"PATH": "/usr/bin"}, spec.env)
     assert env == {"PATH": "/usr/bin"}
+
+
+def _write_stub(tmp_path):
+    path = tmp_path / "stub_mcp.py"
+    path.write_text(_SERVER)
+    return path
+
+
+def _overlay_fixture(tmp_path, monkeypatch):
+    _isolate_home(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    mcp.reset_session()
+    return tmp_path
+
+
+def test_client_overlay_connects_without_config(tmp_path, monkeypatch):
+    _overlay_fixture(tmp_path, monkeypatch)
+    server_py = _write_stub(tmp_path)
+    try:
+        warnings = mcp.set_client_servers(
+            str(tmp_path), [("stub", {"command": sys.executable,
+                                      "args": [str(server_py)]})])
+        assert warnings == []
+        svc = mcp.service()
+        assert "mcp__stub__echo" in svc.tool_names()
+        assert "mcp__stub__write_note" in svc.tool_names()
+    finally:
+        mcp.set_client_servers(str(tmp_path), [])
+        mcp.reset_session()
+
+
+def test_client_overlay_overrides_file_server(tmp_path, monkeypatch):
+    _overlay_fixture(tmp_path, monkeypatch)
+    server_py = _write_stub(tmp_path)
+    (tmp_path / ".mcp.json").write_text(json.dumps(
+        {"mcpServers": {"stub": {"command": sys.executable,
+                                 "args": [str(server_py)]}}}))
+    mcp._set_trusted(str(tmp_path))
+    try:
+        warnings = mcp.set_client_servers(
+            str(tmp_path), [("stub", {"command": "nonexistent-cmd-xyz"})])
+        assert warnings == []
+        svc = mcp.service()
+        assert svc.tool_names() == []
+        assert any("overrides config-file" in w for w in svc.warnings)
+    finally:
+        mcp.set_client_servers(str(tmp_path), [])
+        mcp.reset_session()
+
+
+def test_client_overlay_bad_entry_warns(tmp_path, monkeypatch):
+    _overlay_fixture(tmp_path, monkeypatch)
+    try:
+        warnings = mcp.set_client_servers(str(tmp_path), [("bad", {"args": []})])
+        assert len(warnings) == 1
+        assert mcp.service().tool_names() == []
+    finally:
+        mcp.set_client_servers(str(tmp_path), [])
+        mcp.reset_session()

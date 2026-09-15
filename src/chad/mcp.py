@@ -531,6 +531,23 @@ class _Registry:
                 continue
             to_connect.append((name, spec, kind, build))
 
+        # ACP client-injected servers (see set_client_servers): they arrive with
+        # the session from the operator's own editor, so they carry user-level
+        # trust - no project gate. A client entry wins over a config-file server
+        # of the same name for this cwd.
+        for name, spec in _client_servers.get(os.path.realpath(self.cwd), []):
+            if _SEP in name:
+                self.warnings.append(f"{name}: client server name contains '{_SEP}'; skipped")
+                continue
+            kind, build = _transport_for(spec)
+            if build is None:
+                self.warnings.append(f"{name}: client server has no 'url' or 'command'")
+                continue
+            if any(n == name for n, _s, _k, _b in to_connect):
+                self.warnings.append(f"{name}: client server overrides config-file server")
+            to_connect = [t for t in to_connect if t[0] != name]
+            to_connect.append((name, spec, kind, build))
+
         if not to_connect:
             return
 
@@ -668,6 +685,39 @@ def _is_mutating(tool: "Tool") -> bool:
 
 
 _registry = None
+
+_client_servers: dict[str, list] = {}
+
+def set_client_servers(cwd: str, entries: list) -> list:
+    """Replace the ACP client-injected server overlay for one cwd.
+
+    `entries` is [(name, config-dict)] in the .mcp.json shape, already translated
+    from the ACP wire shape by the caller; each entry decodes leniently, and
+    entries with neither url nor command are skipped with a warning. An empty
+    list clears the overlay. Returns the warnings so the caller can surface
+    them. Resets a live registry for the same cwd so the next service()
+    reconnects with the overlay in place. The overlay outlives registry resets
+    on purpose: sessions share the process, and reset_session tears down
+    connections, not configuration.
+    """
+    global _registry
+    key = os.path.realpath(cwd)
+    decoded = []
+    warnings = []
+    for name, spec in entries:
+        decoded_spec = _ServerSpec.decode(spec if isinstance(spec, dict) else {})
+        if not decoded_spec.url and not decoded_spec.command:
+            warnings.append(f"{name}: client server has no 'url' or 'command'; skipped")
+            continue
+        decoded.append((name, decoded_spec))
+    if decoded:
+        _client_servers[key] = decoded
+    else:
+        _client_servers.pop(key, None)
+    if _registry is not None and os.path.realpath(_registry.cwd) == key:
+        _registry.close()
+        _registry = None
+    return warnings
 
 
 def service() -> "_Registry":

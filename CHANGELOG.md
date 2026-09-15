@@ -4,6 +4,20 @@ Notable, user-visible changes.
 
 ## [Unreleased]
 
+**`chad acp`: drive chad from Zed over Agent Client Protocol v1.** A new
+long-lived stdio subcommand speaks ACP (`initialize`, `session/new`,
+`session/prompt`, `session/cancel`, `session/set_mode`) so Zed custom agent
+servers can use chad: text streams as agent messages, dispatched tools
+announce `tool_call`/`tool_call_update` (edits carry a diff payload), and
+confirmations arrive as `session/request_permission`. One engine turn runs
+at a time; prompts chdir into their session cwd. Covered by
+`tests/test_acp.py` and an official-TypeScript-client harness in
+`tests/acp_client` (see `docs/acp.md` for setup and limits).
+Client-injected MCP servers work too: `session/new` `mcpServers` (stdio and
+streamable HTTP; SSE is skipped with a note) connect with user-level trust,
+override same-named file servers, and announce one `MCP:` summary line on
+the first prompt.
+
 ## [2.1.0] — 2026-09-14
 
 **A write outside your workspace always asks — auto and yolo included.** `write` and

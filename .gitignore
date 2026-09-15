@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+tests/acp_client/node_modules/
 *.log
 *.egg-info/
 build/
