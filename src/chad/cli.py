@@ -790,6 +790,9 @@ def _acp_parser():
                     const="local", metavar="SERVER",
                     help="hide the bash/write/edit builtins and serve same-named MCP "
                          "tools of SERVER under the bare names instead (bridge remote).")
+    ap.add_argument("--log-file", dest="log_file", default=None, metavar="PATH",
+                    help="tee stderr to PATH (also on without it under "
+                         "CHAD_SESSION_LOG; ~/.chad/logs by default).")
     return ap
 
 
@@ -814,6 +817,10 @@ def _bridge_parser():
                     help="start sessions in read-only plan mode.")
     ap.add_argument("--test-remote", dest="test_remote", default=None,
                     choices=("echo", "tool", "slow"), help=argparse.SUPPRESS)
+    ap.add_argument("--log-file", dest="log_file", default=None, metavar="PATH",
+                    help="tee stderr (including [remote] lines) to PATH; the "
+                         "remote chad logs too while this is on (also on "
+                         "without it under CHAD_SESSION_LOG).")
     return ap
 
 

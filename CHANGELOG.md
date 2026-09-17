@@ -37,6 +37,13 @@ streamable HTTP; SSE is skipped with a note) connect with user-level trust,
 override same-named file servers, and announce one `MCP:` summary line on
 the first prompt.
 
+**`chad acp` / `chad acp-bridge`: optional stderr log files.** `--log-file
+PATH` tees each side's stderr (status lines, `[remote]` output, failures)
+to a file; without it, logging to `~/.chad/logs/` follows the
+`CHAD_SESSION_LOG` opt-in. While bridge logging is on, the remote chad
+logs to its own `~/.chad/logs/` too, and both sides announce their
+resolved path on stderr so a hung turn can be diagnosed after the fact.
+
 ## [2.1.0] — 2026-09-14
 
 **A write outside your workspace always asks — auto and yolo included.** `write` and

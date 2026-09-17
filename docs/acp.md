@@ -71,6 +71,19 @@ MCP URL headers. Permission relays allow-once only (never allow-always),
 every mutating tool still shows the Zed prompt, and paths are contained
 to the session workspace on both backings.
 
+## Logs
+
+No log files exist by default: everything goes to stderr (protocol stays
+on stdout). `--log-file PATH` on either `chad acp` or `chad acp-bridge`
+tees stderr to that file; without the flag, logging to `~/.chad/logs/`
+happens only under `CHAD_SESSION_LOG` (same opt-in as the other
+diagnostic traces). While bridge logging is on, the remote chad logs too
+(`~/.chad/logs/` on the remote Mac) — each side announces its resolved
+path as its first stderr line, so the Zed log shows both locations (the
+remote one `[remote]`-prefixed). A log file that cannot be opened never
+aborts startup; the process keeps stderr and says so once. Clean
+`~/.chad/logs/` periodically on both sides.
+
 ## Protocol coverage (v1)
 
 Handled: `initialize`, `authenticate` (no-op, single-user local agent),

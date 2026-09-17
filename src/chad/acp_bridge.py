@@ -502,8 +502,23 @@ def provision_session(host: str, scratch: str, local_cwd: str) -> str:
     return remote_dir
 
 
+def remote_acp_argv(remote_log: str | None) -> list[str]:
+    """Argv for the remote agent: bare names plus an optional log file.
+
+    The log path travels relative so it resolves against the remote home
+    (sshd starts commands there); `--test-remote` never takes one, so the
+    scripted harness leaves no log files behind.
+    """
+    argv = ["chad", "acp", "--no-builtins", "local"]
+    if remote_log is not None:
+        argv += ["--log-file", remote_log]
+    return argv
+
+
 def run(args, host=None) -> int:
     """`chad acp-bridge` entrypoint: relay Zed ACP to a remote chad."""
+    from . import stderr_log as _stderr_log
+    log_path = _stderr_log.install("acp-bridge", args.log_file)
     default_mode = "plan" if args.plan else ("yolo" if args.yolo else "normal")
     # The hub binds first so the ssh forward aims at a port that is really
     # listening: probing a free port up front reopened a race where the
@@ -522,9 +537,14 @@ def run(args, host=None) -> int:
             hub.close()
             return 2
         rport = args.remote_port
+        remote_log = None
+        if log_path is not None:
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            remote_log = ".chad/logs/acp-bridge-remote-%s-%d.log" % (
+                stamp, hub.port)
         ssh_argv = build_ssh_argv(args.remote, rport, hub.port,
                                   list(args.remote_env or []),
-                                  ["chad", "acp", "--no-builtins", "local"])
+                                  remote_acp_argv(remote_log))
         provision = True
         proc, readline, writeline = _spawn(ssh_argv)
         mcp_base = "http://127.0.0.1:%d" % (rport,)

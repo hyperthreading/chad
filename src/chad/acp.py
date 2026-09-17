@@ -1027,7 +1027,9 @@ def _stdout_line(line: str) -> None:
 def run(args, host=None) -> int:
     """`chad acp` entrypoint: serve ACP v1 on stdio until EOF."""
     from . import cli as _cli
+    from . import stderr_log as _stderr_log
     from .agent import Agent
+    _stderr_log.install("acp", args.log_file)
     if host is None:
         host = _cli.HOST
     default_mode = "plan" if args.plan else ("yolo" if args.yolo else "normal")

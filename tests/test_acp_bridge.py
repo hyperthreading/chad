@@ -10,6 +10,7 @@ from chad.acp_bridge import (
     caps_for,
     clamp_mode,
     map_permission_answer,
+    remote_acp_argv,
     remote_scratch,
 )
 
@@ -87,6 +88,15 @@ def test_build_ssh_argv_user_path_wins():
 def test_build_ssh_argv_explicit_path_skips_guard():
     argv = build_ssh_argv("me@box", 1, 2, [], ["/usr/local/bin/chad"])
     assert argv[-1] == "/usr/local/bin/chad"
+
+
+def test_remote_acp_argv_log_file():
+    assert remote_acp_argv(None) == ["chad", "acp", "--no-builtins", "local"]
+    argv = remote_acp_argv(".chad/logs/acp-bridge-remote-x.log")
+    assert argv[-2:] == ["--log-file", ".chad/logs/acp-bridge-remote-x.log"]
+    tail = build_ssh_argv("me@box", 1, 2, [], argv)[-1]
+    assert "--log-file" in tail
+    assert "exec chad acp --no-builtins local" in tail
 
 
 def test_remote_proxy_stop_mapping():
