@@ -58,7 +58,11 @@ def test_build_ssh_argv_shape():
     assert "-R" in argv
     assert "18789:127.0.0.1:51234" in argv
     assert argv[-2] == "me@box"
-    assert argv[-1] == "chad acp --no-builtins local"
+    tail = argv[-1]
+    assert "chad acp --no-builtins local" in tail
+    assert "$HOME/.local/bin" in tail
+    assert "command -v chad" in tail
+    assert "exec " in tail
     assert "ExitOnForwardFailure=yes" in argv
     assert "BatchMode=yes" in argv
 
@@ -66,9 +70,23 @@ def test_build_ssh_argv_shape():
 def test_build_ssh_argv_quotes_env():
     argv = build_ssh_argv("me@box", 1, 2, ["A=b c"], ["chad"])
     tail = argv[-1]
-    assert tail.startswith("env ")
+    assert "env " in tail
     assert "b c" in tail
-    assert tail.count("chad") == 1
+    assert "command -v chad" in tail
+
+
+def test_build_ssh_argv_user_path_wins():
+    argv = build_ssh_argv("me@box", 1, 2, ["PATH=/opt/x/bin:/usr/bin"],
+                          ["chad"])
+    tail = argv[-1]
+    assert "$HOME/.local/bin" not in tail
+    assert "/opt/x/bin" in tail
+    assert "command -v chad" in tail
+
+
+def test_build_ssh_argv_explicit_path_skips_guard():
+    argv = build_ssh_argv("me@box", 1, 2, [], ["/usr/local/bin/chad"])
+    assert argv[-1] == "/usr/local/bin/chad"
 
 
 def test_remote_proxy_stop_mapping():

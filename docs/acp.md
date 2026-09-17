@@ -41,8 +41,13 @@ serves the file and shell tools back to the remote model over a forwarded
 MCP endpoint, so tool calls execute locally through Zed's own
 `fs`/`terminal` capabilities (with local execution as fallback).
 
-Remote prerequisites: key-based `ssh USER@HOST`, and a `chad` that
-resolves non-interactively there (the `chad-code` install provides it).
+Remote prerequisites: key-based `ssh USER@HOST`, and a `chad` on the
+remote. The bridge prepends `~/.local/bin` (the `uv tool install`
+default) to the remote PATH itself, because non-interactive ssh skips
+`~/.zshrc` and that directory is otherwise missing. If chad lives
+elsewhere off the non-interactive PATH, check `ssh USER@HOST
+'command -v chad'` prints a path; if not, pass `--remote-env
+PATH=...` or symlink chad into `/usr/local/bin`.
 Register the bridge instead of `chad acp` in Zed `settings.json`:
 
 ```json

@@ -805,7 +805,9 @@ def _bridge_parser():
                     help="remote loopback port forwarded to the local MCP hub.")
     ap.add_argument("--remote-env", dest="remote_env", action="append",
                     default=[], metavar="KEY=VAL",
-                    help="non-secret env for the remote command (repeatable).")
+                    help="non-secret env for the remote command (repeatable; "
+                         "setting PATH here overrides the ~/.local/bin "
+                         "default).")
     ap.add_argument("--yolo", action="store_true",
                     help="start sessions in yolo mode (remote still asks).")
     ap.add_argument("--plan", action="store_true",

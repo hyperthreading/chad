@@ -334,22 +334,48 @@ _SSH_BASE = ["ssh", "-o", "ExitOnForwardFailure=yes", "-o", "BatchMode=yes",
              "-o", "ServerAliveInterval=30", "-q", "-o", "LogLevel=ERROR"]
 
 
-def build_ssh_argv(host: str, rport: int, lport: int, env: list,
-                   remote_argv: list) -> list:
+def build_ssh_argv(host: str, rport: int, lport: int, env: list[str],
+                   remote_argv: list[str]) -> list[str]:
     """Argv spawning remote chad with a loopback forward, shell-safe.
 
     The remote command travels as one shlex-quoted string (ssh joins argv
     with spaces remotely); env assignments ride the same string so values
     with spaces cannot become commands. Non-secret env only; secrets go
     over typed channels, never argv.
+
+    Non-interactive ssh skips ~/.zshrc, so ~/.local/bin (the `uv tool
+    install` default) is usually missing remotely even when an interactive
+    login finds chad. Unless the caller already sets PATH, the remote
+    command is prefixed with PATH="$HOME/.local/bin:$PATH" (expanded
+    remotely, so an explicit local path never leaks in). A `command -v`
+    guard then fails fast with the fix instead of a bare "command not
+    found" followed by an initialize timeout.
     """
-    parts = []
+    parts: list[str] = []
     if env:
         parts.append("env")
         parts.extend(env)
     parts.extend(remote_argv)
+    quoted = " ".join(shlex.quote(p) for p in parts)
+    binary = remote_argv[0] if remote_argv else "chad"
+    if "/" in binary:
+        remote_cmd = quoted
+    else:
+        has_path = any(item.startswith("PATH=") for item in env)
+        prefix = "" if has_path else 'PATH="$HOME/.local/bin:$PATH" '
+        hint = ("chad acp-bridge: chad not found on the remote PATH. "
+                "Non-interactive ssh skips ~/.zshrc, so ~/.local/bin "
+                "(the uv tool install default) is often missing. Check "
+                "ssh " + host + " command -v chad prints a path; if not, "
+                "pass --remote-env PATH=... or symlink chad into "
+                "/usr/local/bin.")
+        remote_cmd = (
+            prefix + "command -v " + shlex.quote(binary)
+            + " >/dev/null 2>&1 || { echo " + shlex.quote(hint)
+            + " >&2; exit 127; }; " + prefix + "exec " + quoted
+        )
     return _SSH_BASE + ["-R", "%d:127.0.0.1:%d" % (rport, lport), host,
-            " ".join(shlex.quote(p) for p in parts)]
+                        remote_cmd]
 
 
 @dataclass
@@ -503,9 +529,17 @@ def run(args, host=None) -> int:
         proc, readline, writeline = _spawn(ssh_argv)
         mcp_base = "http://127.0.0.1:%d" % (rport,)
     driver = RemoteDriver(readline, writeline)
-    ok, _res = driver.initialize({})
+    ok, res = driver.initialize({})
     if not ok:
-        sys.stderr.write("chad acp-bridge: remote initialize failed\n")
+        sys.stderr.write(
+            "chad acp-bridge: remote initialize failed: %s\n" % (res,))
+        if provision:
+            sys.stderr.write(
+                "chad acp-bridge: the remote shell could not start chad "
+                "(see the [remote] lines above). Check `ssh %s "
+                "'command -v chad'` prints a path; if not, pass "
+                "--remote-env PATH=... or symlink chad into "
+                "/usr/local/bin.\n" % (args.remote,))
         try:
             proc.kill()
         except Exception:
