@@ -4,8 +4,11 @@ Pure relay rules plus ssh spawn shape. The three-tier run lives in
 tests/acp_client/run-bridge.mjs (official client, scripted remote).
 """
 
+import subprocess
+
 from chad.acp_bridge import (
     RemoteProxy,
+    _ssh_exec,
     build_ssh_argv,
     caps_for,
     clamp_mode,
@@ -97,6 +100,35 @@ def test_remote_acp_argv_log_file():
     tail = build_ssh_argv("me@box", 1, 2, [], argv)[-1]
     assert "--log-file" in tail
     assert "exec chad acp --no-builtins local" in tail
+
+
+class _RecordRun:
+    """Injectable _ssh_exec seam: records kwargs, answers empty success."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+
+def test_ssh_exec_without_input_gets_devnull_stdin():
+    # Regression: an inheriting ssh forwards Zed's next stdin bytes to the
+    # remote command, stealing them from the bridge's ACP stream (a prompt
+    # sent while a provision exec is alive hangs, then errors).
+    rec = _RecordRun()
+    code, out, err = _ssh_exec("me@box", "true", _run=rec)
+    assert (code, out, err) == (0, b"", b"")
+    assert rec.calls[0][1]["stdin"] == subprocess.DEVNULL
+    assert "input" not in rec.calls[0][1]
+
+
+def test_ssh_exec_with_input_pipes_bytes():
+    rec = _RecordRun()
+    _ssh_exec("me@box", "cat", input_bytes=b"hi", _run=rec)
+    assert rec.calls[0][1]["input"] == b"hi"
+    assert "stdin" not in rec.calls[0][1]
 
 
 def test_remote_proxy_stop_mapping():

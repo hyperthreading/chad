@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Protocol
 from urllib.parse import quote
 
 from . import bridge_mcp
@@ -448,15 +449,38 @@ def _spawn(argv, cwd=None):
     return proc, readline, writeline
 
 
+class _Runner(Protocol):
+    """The subprocess.run surface _ssh_exec needs (its injectable seam)."""
+
+    def __call__(self, argv: list[str], *, stdin: int | None = ...,
+                 input: bytes | None = ..., capture_output: bool = ...,
+                 timeout: float = ...) -> subprocess.CompletedProcess[bytes]:
+        ...  # pragma: no cover - contract only
+
+
 def _ssh_exec(host: str, remote_cmd: str, extra_opts=None, input_bytes=None,
-              timeout=30):
-    """Run one short remote command; returns (returncode, out, err)."""
+              timeout=30, _run: _Runner | None = None):
+    """Run one short remote command; returns (returncode, out, err).
+
+    Without input the child gets DEVNULL stdin, never the bridge's own:
+    an inheriting ssh forwards whatever Zed writes next to the remote
+    command, stealing ACP bytes out of the bridge's stdin and hanging
+    the turn that sent them.
+    """
     argv = list(_SSH_OPTS)
     argv.extend(extra_opts or [])
     argv += [host, remote_cmd]
+    # SAFETY: subprocess.run's overloads cover the protocol's keyword-only
+    # surface (DEVNULL stdin or byte input, captured output, timeout); the
+    # ignore only bridges the overload-to-Protocol assignment.
+    runner: _Runner = _run if _run is not None else subprocess.run  # type: ignore[assignment]
     try:
-        done = subprocess.run(argv, input=input_bytes, capture_output=True,
-                              timeout=timeout)
+        if input_bytes is None:
+            done = runner(argv, stdin=subprocess.DEVNULL,
+                          capture_output=True, timeout=timeout)
+        else:
+            done = runner(argv, input=input_bytes,
+                          capture_output=True, timeout=timeout)
     except Exception as e:
         raise _BridgeError("ssh exec failed: %r" % (e,))
     return done.returncode, done.stdout, done.stderr
