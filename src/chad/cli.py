@@ -8,8 +8,8 @@ One model (Qwen3.8-27B, 3-bit, with its DFlash2 drafter), one entrypoint, run wi
     uv run chad -c                             # resume this directory's conversation
     uv run chad --model <repo|dir>             # run different weights
 
-Plus three subcommands, each with its own `--help`: `chad prove`, `chad levers`,
-`chad acp`.
+Plus four subcommands, each with its own `--help`: `chad prove`, `chad levers`,
+`chad acp`, `chad acp-bridge`.
 
 Rare long-session knobs live in env vars — see docs/configuration.md.
 """
@@ -670,7 +670,7 @@ def _pick_session(items, *, ask: Callable[[str], str] = input):
 # would either shadow it or force `chad -- "some task"`; matching argv[1] exactly keeps
 # `chad "prove the parser handles empty input"` a task and `chad prove` a subcommand,
 # which is the same rule the old literal-positional dispatch used.
-_SUBCOMMANDS = ("prove", "levers", "acp")
+_SUBCOMMANDS = ("prove", "levers", "acp", "acp-bridge")
 
 # Set by `_main` once the remote backend's URL is resolved, so the top-level BackendError
 # handler can name the host that stopped answering. Only the remote backend can raise
@@ -682,7 +682,8 @@ def _agent_parser():
     ap = argparse.ArgumentParser(
         prog="chad",
         description="Local coding agent for a 24 GB Apple Silicon Mac (MLX, one model, no API key).",
-        epilog="subcommands (each takes --help): chad prove · chad levers · chad acp. "
+        epilog="subcommands (each takes --help): chad prove · chad levers · chad acp "
+               "· chad acp-bridge. "
                "Long-session and unattended-run knobs live in CHAD_* env vars — "
                "see docs/configuration.md.",
     )
@@ -785,6 +786,32 @@ def _acp_parser():
                     help="skip the model's <think> reasoning blocks (faster).")
     ap.add_argument("--test-agent", dest="test_agent", default=None,
                     choices=("echo", "tool", "slow"), help=argparse.SUPPRESS)
+    ap.add_argument("--no-builtins", dest="no_builtins", default=None, nargs="?",
+                    const="local", metavar="SERVER",
+                    help="hide the bash/write/edit builtins and serve same-named MCP "
+                         "tools of SERVER under the bare names instead (bridge remote).")
+    return ap
+
+
+def _bridge_parser():
+    ap = argparse.ArgumentParser(
+        prog="chad acp-bridge",
+        description="Relay Zed ACP to a remote chad over ssh, serving local "
+                    "file and shell tools back over a forwarded MCP endpoint.",
+    )
+    ap.add_argument("--remote", default=None,
+                    help="remote ssh destination (USER@HOST) serving chad.")
+    ap.add_argument("--remote-port", dest="remote_port", type=int, default=18789,
+                    help="remote loopback port forwarded to the local MCP hub.")
+    ap.add_argument("--remote-env", dest="remote_env", action="append",
+                    default=[], metavar="KEY=VAL",
+                    help="non-secret env for the remote command (repeatable).")
+    ap.add_argument("--yolo", action="store_true",
+                    help="start sessions in yolo mode (remote still asks).")
+    ap.add_argument("--plan", action="store_true",
+                    help="start sessions in read-only plan mode.")
+    ap.add_argument("--test-remote", dest="test_remote", default=None,
+                    choices=("echo", "tool", "slow"), help=argparse.SUPPRESS)
     return ap
 
 
@@ -849,6 +876,9 @@ def _main(argv, host, load_backend):
     if sub == "acp":
         from . import acp
         sys.exit(acp.run(_acp_parser().parse_args(argv[1:]), host=host))
+    if sub == "acp-bridge":
+        from . import acp_bridge
+        sys.exit(acp_bridge.run(_bridge_parser().parse_args(argv[1:]), host=host))
 
     args = _agent_parser().parse_args(argv)
     if args.levers:  # deprecated spelling of `chad levers`

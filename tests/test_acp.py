@@ -20,19 +20,23 @@ from chad.base_engine import GenStats
 class Rig:
     """In-process JSON-RPC client: NDJSON lines across two queues."""
 
-    def __init__(self, script, default_mode="normal"):
+    def __init__(self, script, default_mode="normal",
+                 connect_client_servers=True):
         self.incoming = queue.Queue()
         self.outgoing = queue.Queue()
         self.created = []
         inner = acp.fake_agent_factory(script)
 
-        def recording_factory(cwd, mode, emit, confirm, should_stop, tool_event):
+        def recording_factory(cwd, mode, emit, confirm, should_stop, tool_event,
+                              session_id=None):
             agent = inner(cwd, mode, emit, confirm, should_stop, tool_event)
             self.created.append(agent)
             return agent
 
-        self.server = acp.AcpServer(self._readline, self._writeline,
-                                    recording_factory, default_mode=default_mode)
+        self.server = acp.AcpServer(
+            self._readline, self._writeline, recording_factory,
+            default_mode=default_mode,
+            connect_client_servers=connect_client_servers)
         self.thread = threading.Thread(target=self.server.serve_forever,
                                        daemon=True)
         self._seq = 0
@@ -468,9 +472,11 @@ def test_client_server_translation():
 
 _MCP_STUB = (
     "import json, sys\n"
-    "TOOL = {\"name\": \"echo\", \"description\": \"Echo.\", "
+    "TOOLS = [{\"name\": \"echo\", \"description\": \"Echo.\", "
     "\"inputSchema\": {\"type\": \"object\", \"properties\": {\"text\": {\"type\": \"string\"}}}, "
-    "\"annotations\": {\"readOnlyHint\": True}}\n"
+    "\"annotations\": {\"readOnlyHint\": True}}, "
+    "{\"name\": \"do\", \"description\": \"Do.\", "
+    "\"inputSchema\": {\"type\": \"object\", \"properties\": {\"text\": {\"type\": \"string\"}}}}]\n"
     "def send(m):\n"
     "    sys.stdout.write(json.dumps(m) + \"\\n\")\n"
     "    sys.stdout.flush()\n"
@@ -486,7 +492,7 @@ _MCP_STUB = (
     "    elif method == \"notifications/initialized\":\n"
     "        pass\n"
     "    elif method == \"tools/list\":\n"
-    "        send({\"jsonrpc\": \"2.0\", \"id\": mid, \"result\": {\"tools\": [TOOL]}})\n"
+    "        send({\"jsonrpc\": \"2.0\", \"id\": mid, \"result\": {\"tools\": TOOLS}})\n"
     "    elif method == \"tools/call\":\n"
     "        text = (req.get(\"params\") or {}).get(\"arguments\", {}).get(\"text\", \"\")\n"
     "        send({\"jsonrpc\": \"2.0\", \"id\": mid, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"stub says: \" + str(text)}]}})\n"
@@ -547,7 +553,8 @@ def test_client_mcp_end_to_end(tmp_path, monkeypatch):
         _tcall("done", summary="ok"),
     ]
 
-    def make_agent(cwd, mode, emit, confirm, should_stop, tool_event):
+    def make_agent(cwd, mode, emit, confirm, should_stop, tool_event,
+                   session_id=None):
         return Agent(_Scripted(script), mode=mode, thinking=False, emit=emit,
                      confirm=confirm, should_stop=should_stop,
                      tool_event=tool_event, persist=False)
@@ -578,4 +585,117 @@ def test_client_mcp_end_to_end(tmp_path, monkeypatch):
     finally:
         mcp.set_client_servers(str(tmp_path), [])
         mcp.reset_session()
+        rig.close()
+
+
+def _no_builtin_fixture(tmp_path, monkeypatch, server="bridge"):
+    from chad import tools as _tools
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    mcp.reset_session()
+    stub = tmp_path / "nb_stub.py"
+    stub.write_text(_MCP_STUB)
+    warnings = mcp.set_client_servers(
+        str(tmp_path), [(server, {"command": sys.executable,
+                                  "args": [str(stub)]})])
+    assert warnings == []
+    _tools.set_name_overlay({
+        "bash": "mcp__" + server + "__do",
+        "read": "mcp__" + server + "__echo",
+    })
+    return mcp
+
+
+def test_overlay_never_auto_approves(tmp_path, monkeypatch):
+    from chad import tools as _tools
+    from chad.agent import auto_approves
+    _no_builtin_fixture(tmp_path, monkeypatch)
+    try:
+        assert auto_approves("yolo", "bash") is False
+        assert auto_approves("auto", "bash") is False
+        assert auto_approves("normal", "bash") is False
+        _tools.set_name_overlay({})
+        assert auto_approves("yolo", "bash") is True
+    finally:
+        _tools.set_name_overlay({})
+        mcp.set_client_servers(str(tmp_path), [])
+        mcp.reset_session()
+
+
+def test_yolo_still_asks_for_overlay_tools(tmp_path, monkeypatch):
+    asked = []
+    _no_builtin_fixture(tmp_path, monkeypatch)
+    try:
+        agent = Agent(
+            _Scripted([_tcall("bash", text="hi"),
+                       _tcall("done", summary="ok")]),
+            mode="yolo", thinking=False,
+            confirm=lambda n, a: asked.append(n) or True)
+        agent.run_turn("run it")
+        assert asked == ["bash"]
+        tool_texts = [m.get("content", "") for m in agent.messages
+                      if m.get("role") == "tool"]
+        assert any("stub says: hi" in t for t in tool_texts)
+    finally:
+        from chad import tools as _tools
+        _tools.set_name_overlay({})
+        mcp.set_client_servers(str(tmp_path), [])
+        mcp.reset_session()
+
+
+def test_acp_no_builtins_flag():
+    from chad import cli as _cli
+    assert _cli._acp_parser().parse_args([]).no_builtins is None
+    assert _cli._acp_parser().parse_args(["--no-builtins"]).no_builtins == "local"
+    parsed = _cli._acp_parser().parse_args(["--no-builtins", "edge"])
+    assert parsed.no_builtins == "edge"
+def test_bridge_mode_forwards_url_servers_only(tmp_path):
+    rig = Rig("echo", connect_client_servers=False)
+    try:
+        rig.initialize()
+        rid = rig.request("session/new", {
+            "cwd": str(tmp_path),
+            "mcpServers": [
+                {"name": "ctx", "type": "http",
+                 "url": "http://example.invalid/mcp",
+                 "headers": [{"name": "A", "value": "b"}]},
+                {"name": "sse-feed", "type": "sse",
+                 "url": "http://example.invalid/sse"},
+                {"name": "editor-cmd", "command": "do-thing",
+                 "args": []},
+            ]})
+        msg, _ = rig.expect_response(rid)
+        sid = msg["result"]["sessionId"]
+        assert rig.server.session_client_servers(sid) == [
+            {"name": "ctx", "type": "http",
+             "url": "http://example.invalid/mcp",
+             "headers": [{"name": "A", "value": "b"}]}]
+        assert rig.server.session_client_servers("missing") == []
+        with rig.server._sessions_lock:
+            notes = list(rig.server._sessions[sid].mcp_notes)
+        assert any("editor-cmd" in n and "do not cross" in n for n in notes)
+    finally:
+        rig.close()
+def test_prompts_share_one_worker_thread(tmp_path):
+    # The MLX engine binds streams to the thread that first ran it; a fresh
+    # thread per prompt crashed the second live turn with
+    # `no Stream(gpu, 1) in current thread`, so every turn must run on the
+    # same worker.
+    rig = Rig("echo")
+    try:
+        rig.initialize()
+        msg, _ = rig.new_session(tmp_path)
+        sid = msg["result"]["sessionId"]
+        for word in ("one", "two"):
+            rid = rig.request("session/prompt", {
+                "sessionId": sid,
+                "prompt": [{"type": "text", "text": word}]})
+            msg, _ = rig.expect_response(rid)
+            assert msg["result"]["stopReason"] == "end_turn"
+        idents = rig.created[0].thread_idents
+        assert len(idents) == 2
+        assert idents[0] == idents[1]
+    finally:
         rig.close()

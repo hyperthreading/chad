@@ -29,6 +29,7 @@ client entry wins a same-name conflict.
 
 import json
 import os
+import queue
 import sys
 import threading
 import time
@@ -197,6 +198,46 @@ def client_server_specs(servers: list) -> tuple[list, list]:
     return accepted, skipped
 
 
+
+def _bridge_forward_servers(raw: list) -> list:
+    """Forwardable Zed url-servers for the bridge (bridge mode only).
+
+    Command entries stay local-only by design (see _on_new_session), so
+    only url entries cross: name-checked like client_server_specs, SSE
+    skipped the same way. Headers ride verbatim; the bearer for the bridge
+    overlay is minted per session elsewhere."""
+    forward: list = []
+    for entry in raw:
+        if not is_json_object(entry):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name or "__" in name:
+            continue
+        url = entry.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        if entry.get("type") == "sse":
+            continue
+        item: dict = {"name": name, "url": url}
+        kind = entry.get("type")
+        if isinstance(kind, str) and kind:
+            item["type"] = kind
+        headers = entry.get("headers")
+        if isinstance(headers, list):
+            item["headers"] = headers
+        forward.append(item)
+    return forward
+
+
+def _bridge_dropped_commands(raw: list, accepted: list) -> list:
+    """Names accepted locally that the bridge will not forward."""
+    names: list = []
+    for name, config in accepted:
+        if is_json_object(config) and isinstance(config.get("command"), str):
+            names.append(name)
+    return names
+
+
 def tool_title(name: str, args: dict) -> str:
     """One-line human title for a tool call, mirroring render_tool_start."""
     if name in ("edit", "write"):
@@ -256,6 +297,7 @@ class _AcpSession:
     current_tool: str | None = None
     mcp_notes: list = field(default_factory=list)
     mcp_wanted: bool = False
+    client_servers: list = field(default_factory=list)
 
 
 @dataclass
@@ -286,11 +328,13 @@ class FakeAgent:
         self.interrupted = False
         self.budget_note: str | None = None
         self.saved = False
+        self.thread_idents: list = []
 
     def save(self) -> None:
         self.saved = True
 
     def run_turn(self, user_text: str, stream: bool = True) -> str:
+        self.thread_idents.append(threading.get_ident())
         if self.script == "tool":
             return self._run_tool()
         if self.script == "slow":
@@ -333,7 +377,8 @@ def fake_agent_factory(script: str):
     if script not in ("echo", "tool", "slow"):
         raise ValueError("unknown test script: " + script)
 
-    def make_agent(cwd, mode, emit, confirm, should_stop, tool_event):
+    def make_agent(cwd, mode, emit, confirm, should_stop, tool_event,
+                   session_id=None):
         return FakeAgent(cwd, mode, script, emit=emit, confirm=confirm,
                          should_stop=should_stop, tool_event=tool_event)
 
@@ -345,18 +390,20 @@ class AcpServer:
 
     readline returns the next client line (None on EOF); writeline takes one
     outgoing line. make_agent(cwd, mode, emit, confirm, should_stop,
-    tool_event) builds the turn runner for a session, lazily on first prompt
-    so session/new never disturbs a running turn. Prompts execute on worker
+    tool_event, session_id) builds the turn runner for a session, lazily on
+    first prompt so session/new never disturbs a running turn. Prompts execute on worker
     threads under one engine lock; the reader keeps serving cancel.
     """
 
     def __init__(self, readline: Callable[[], Optional[str]],
                  writeline: Callable[[str], None], make_agent,
-                 default_mode: str = "normal"):
+                 default_mode: str = "normal",
+                 connect_client_servers: bool = True):
         self._readline = readline
         self._writeline = writeline
         self._make_agent = make_agent
         self._default_mode = default_mode
+        self._connect_client_servers = connect_client_servers
         self._send_lock = threading.Lock()
         self._sessions: dict[str, _AcpSession] = {}
         self._sessions_lock = threading.Lock()
@@ -366,7 +413,12 @@ class AcpServer:
         self._prompt_lock = threading.Lock()
         self._prompt_requests: dict[str, str] = {}
         self._prompt_requests_lock = threading.Lock()
+        self._prompt_queue: queue.Queue = queue.Queue()
+        self._prompt_thread = threading.Thread(target=self._prompt_loop,
+                                               daemon=True)
+        self._prompt_thread.start()
         self._running = True
+        self.client_capabilities: dict = {}
 
     def serve_forever(self) -> None:
         """Read requests and notifications until EOF."""
@@ -445,6 +497,8 @@ class AcpServer:
         raise _RequestError(_METHOD_NOT_FOUND, "unknown method: " + method)
 
     def _on_initialize(self, params: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        caps = params.get("clientCapabilities")
+        self.client_capabilities = dict(caps) if is_json_object(caps) else {}
         return {"protocolVersion": PROTOCOL_VERSION,
                 "agentCapabilities": {"loadSession": False,
                                       "promptCapabilities": {"embeddedContext": True}}}
@@ -467,10 +521,22 @@ class AcpServer:
         rec = _AcpSession(session_id=session_id, cwd=cwd,
                           start_mode=self._default_mode)
         raw_servers = params.get("mcpServers")
-        accepted, skipped = client_server_specs(
-            raw_servers if isinstance(raw_servers, list) else [])
+        raw_list = raw_servers if isinstance(raw_servers, list) else []
+        accepted, skipped = client_server_specs(raw_list)
         rec.mcp_wanted = "mcpServers" in params
-        rec.mcp_notes = skipped + mcp.set_client_servers(cwd, accepted)
+        if self._connect_client_servers:
+            rec.mcp_notes = skipped + mcp.set_client_servers(cwd, accepted)
+        else:
+            # Bridge relay: no agent loop runs on this box, so client servers
+            # are never connected here. Command entries would spawn local
+            # editor-configured commands nobody can call, so they stay
+            # dropped with a note; url entries ride to the remote session/new.
+            rec.client_servers = _bridge_forward_servers(raw_list)
+            notes = list(skipped)
+            for name in _bridge_dropped_commands(raw_list, accepted):
+                notes.append(name + ": command servers do not cross the "
+                             "bridge; skipped")
+            rec.mcp_notes = notes
         with self._sessions_lock:
             self._sessions[session_id] = rec
         available: list = []
@@ -543,9 +609,21 @@ class AcpServer:
         key = _id_key(msgid)
         with self._prompt_requests_lock:
             self._prompt_requests[key] = rec.session_id
-        worker = threading.Thread(target=self._run_prompt,
-                                  args=(msgid, key, rec, prompt), daemon=True)
-        worker.start()
+        self._prompt_queue.put((msgid, key, rec, prompt))
+
+    def _prompt_loop(self) -> None:
+        # One worker for every turn: the MLX engine binds streams to the
+        # thread that first ran it, so a fresh thread per prompt crashed
+        # turn two live (`no Stream(gpu, 1) in current thread`). The busy
+        # lock keeps the one-at-a-time contract; the reader still serves
+        # cancel while a turn runs.
+        while True:
+            item = self._prompt_queue.get()
+            msgid, key, rec, blocks = item
+            try:
+                self._run_prompt(msgid, key, rec, blocks)
+            except Exception as e:  # noqa: BLE001 - a turn fault still frees the loop
+                sys.stderr.write("chad acp: prompt worker failed: " + repr(e) + "\n")
 
     def _run_prompt(self, msgid: JsonValue, key: str, rec: _AcpSession,
                     blocks: list) -> None:
@@ -568,11 +646,13 @@ class AcpServer:
                 agent = rec.agent
                 if agent is None:
                     try:
-                        agent = self._make_agent(rec.cwd, rec.start_mode,
-                                                 self._emit_closure(rec),
-                                                 self._confirm_closure(rec),
-                                                 rec.cancel.is_set,
-                                                 self._tool_event_closure(rec))
+                        agent = self._make_agent(
+                            rec.cwd, rec.start_mode,
+                            self._emit_closure(rec),
+                            self._confirm_closure(rec),
+                            rec.cancel.is_set,
+                            self._tool_event_closure(rec),
+                            session_id=rec.session_id)
                     except SystemExit:
                         raise _RequestError(_INTERNAL_ERROR, "agent startup aborted")
                     rec.agent = agent
@@ -797,17 +877,36 @@ class AcpServer:
                     "method": method, "params": params})
         return request_id
 
-    def _await_permission(self, request_id: int, rec: _AcpSession) -> str:
-        """Wait for the permission answer; cancel or client errors deny."""
+    def _wait_pending(self, request_id: int, rec: _AcpSession,
+                      timeout_s=None):
+        """Block until the client answers, the turn cancels, or timeout lapses.
+
+        Always unregisters the request. Returns the settled _Pending, or None
+        when the wait ended without an answer."""
+        deadline = None if timeout_s is None else time.monotonic() + timeout_s
         with self._pending_lock:
             pending = self._pending.get(request_id)
         while pending is not None and self._running:
             if rec.cancel.is_set():
                 break
-            if pending.event.wait(0.05):
+            if deadline is None:
+                done = pending.event.wait(0.05)
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                done = pending.event.wait(min(0.05, remaining))
+            if done:
                 break
         with self._pending_lock:
             self._pending.pop(request_id, None)
+        if pending is not None and pending.event.is_set():
+            return pending
+        return None
+
+    def _await_permission(self, request_id: int, rec: _AcpSession) -> str:
+        """Wait for the permission answer; cancel or client errors deny."""
+        pending = self._wait_pending(request_id, rec)
         if pending is None or rec.cancel.is_set() or not self._running:
             return "cancelled"
         if pending.error is not None:
@@ -825,6 +924,56 @@ class AcpServer:
                     if option in ("allow-once", "allow-always", "reject-once"):
                         return str(option)
         return "reject-once"  # unknown shape: deny, the safe default
+
+    def call_client(self, rec: _AcpSession, method: str,
+                    params: dict[str, JsonValue],
+                    timeout_s=None) -> tuple[bool, JsonValue]:
+        """Synchronous client request for handlers outside confirm.
+
+        Returns (True, result) or (False, error-text). Cancel maps to a
+        cancelled error; an overall timeout maps to a timeout error."""
+        request_id = self._client_request(method, params)
+        pending = self._wait_pending(request_id, rec, timeout_s)
+        if pending is None:
+            if rec.cancel.is_set() or not self._running:
+                return False, "cancelled"
+            return False, "timed out waiting for the client"
+        if pending.error is not None:
+            return False, pending.error
+        return True, pending.result
+
+    def request_client(self, session_id: str, method: str,
+                       params: dict[str, JsonValue],
+                       timeout_s=None) -> tuple[bool, JsonValue]:
+        """Synchronous client request bound to a Zed session (bridge use).
+
+        Unknown session answers immediately; otherwise like call_client."""
+        with self._sessions_lock:
+            rec = self._sessions.get(session_id)
+        if rec is None:
+            return False, "unknown session"
+        return self.call_client(rec, method, params, timeout_s)
+
+    def send_update(self, session_id: str, update: dict[str, JsonValue]) -> bool:
+        """Forward one session update to a Zed session (bridge use)."""
+        with self._sessions_lock:
+            known = session_id in self._sessions
+        if not known:
+            return False
+        self._send(_notify("session/update",
+                           {"sessionId": session_id, "update": update}))
+        return True
+
+    def session_client_servers(self, session_id: str) -> list:
+        """Forwardable Zed url-servers for one session (bridge use).
+
+        Unknown sessions answer empty; entries are copied so callers cannot
+        mutate session state."""
+        with self._sessions_lock:
+            rec = self._sessions.get(session_id)
+        if rec is None:
+            return []
+        return [dict(entry) for entry in rec.client_servers]
 
 
 class _LazyEngine:
@@ -883,6 +1032,18 @@ def run(args, host=None) -> int:
         host = _cli.HOST
     default_mode = "plan" if args.plan else ("yolo" if args.yolo else "normal")
     thinking = not args.no_think
+    if args.no_builtins is not None:
+        from . import tools as _tools
+        server = args.no_builtins
+        if not server or "__" in server:
+            sys.stderr.write("chad acp: --no-builtins needs a plain server name\n")
+            return 2
+        _tools.set_name_overlay({
+            "bash": "mcp__" + server + "__bash",
+            "write": "mcp__" + server + "__write",
+            "edit": "mcp__" + server + "__edit",
+            "read": "mcp__" + server + "__read",
+        })
     if args.test_agent is not None:
         make_agent = fake_agent_factory(args.test_agent)
     else:
@@ -890,7 +1051,8 @@ def run(args, host=None) -> int:
         model_id, _why = _cli._pick_model(args.model, host=host)
         engines = _LazyEngine(model_id, thinking)
 
-        def make_agent(cwd, mode, emit, confirm, should_stop, tool_event):
+        def make_agent(cwd, mode, emit, confirm, should_stop, tool_event,
+                       session_id=None):
             engine, ctx_limit = engines.bundle()
             return Agent(engine, yolo=(mode == "yolo"), mode=mode,
                          thinking=thinking, emit=emit, confirm=confirm,

@@ -54,6 +54,7 @@ from .tools import (
     dispatch_for,
     is_json_object,
     is_mutating,
+    is_overlay,
     outside_workspace,
     unfinished_todos,
 )
@@ -295,6 +296,10 @@ AUTO_EDIT_TOOLS = {"write", "edit"}
 def auto_approves(mode: str, name: str) -> bool:
     """Does `mode` clear tool `name` without asking a human? Read-only tools never
     reach here (the caller checks is_mutating first)."""
+    if is_overlay(name):
+        # Overlaid MCP tools always ask, in every mode: an auto-approved remote
+        # `write` would silently write through the bridge with nobody watching.
+        return False
     if mode == "yolo":
         return True
     return mode == "auto" and name in AUTO_EDIT_TOOLS

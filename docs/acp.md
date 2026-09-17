@@ -32,6 +32,40 @@ Flags: `--model`, `--yolo` and `--plan` set the starting session mode
 (normal by default; switchable per session), `--no-think` matches the
 main CLI. `CHAD_*` environment knobs work unchanged.
 
+## Remote bridge (`chad acp-bridge`)
+
+When the fast Mac lives elsewhere, the full chad (harness plus MLX
+engine, in-process) runs on a remote Apple Silicon Mac while Zed and the
+files stay local. The bridge relays prompts over one ssh connection and
+serves the file and shell tools back to the remote model over a forwarded
+MCP endpoint, so tool calls execute locally through Zed's own
+`fs`/`terminal` capabilities (with local execution as fallback).
+
+Remote prerequisites: key-based `ssh USER@HOST`, and a `chad` that
+resolves non-interactively there (the `chad-code` install provides it).
+Register the bridge instead of `chad acp` in Zed `settings.json`:
+
+```json
+{
+  "agent_servers": {
+    "chad-remote": {
+      "type": "custom",
+      "command": "chad",
+      "args": ["acp-bridge", "--remote", "USER@HOST"],
+      "env": {}
+    }
+  }
+}
+```
+
+Flags: `--remote-port` (default 18789, the remote loopback port forwarded
+to the bridge), repeatable `--remote-env KEY=VAL` for non-secret remote
+env, `--plan`/`--yolo` starting modes. Secrets never travel argv or env:
+the per-session MCP bearer is minted locally and injected through the
+MCP URL headers. Permission relays allow-once only (never allow-always),
+every mutating tool still shows the Zed prompt, and paths are contained
+to the session workspace on both backings.
+
 ## Protocol coverage (v1)
 
 Handled: `initialize`, `authenticate` (no-op, single-user local agent),
@@ -76,6 +110,11 @@ banked a progress note, else `end_turn`.
 - `tests/acp_client/live.mjs` (`node live.mjs`): one tiny real-weights task
   through the same official client. Manual only: it downloads nothing new
   but needs the cached model, auto-approves permissions, and takes minutes.
+- `tests/test_acp_bridge.py` (relay rules, ssh shape, permission mapping)
+  and `tests/test_bridge_mcp.py` (containment, both backings, hub
+  isolation, real-client interop), plus `tests/acp_client/run-bridge.mjs`
+  (`npm run test:bridge`): the official client drives the bridge against
+  a scripted remote, including the permission-grants verdict.
 - `tests/test_mcp.py` client-overlay tests plus `test_client_mcp_end_to_end`
   in `tests/test_acp.py`: a real stub MCP server over stdio, driven through
   a real `Agent` and the ACP transport with no weights.

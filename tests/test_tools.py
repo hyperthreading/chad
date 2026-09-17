@@ -578,3 +578,137 @@ def test_unfinished_todos_reads_json_text_from_the_xml_transport():
                            '{"content": "b", "status": "pending"}]')
     assert tools.unfinished_todos() == ["b"]
     tools.clear_todos()
+
+
+
+
+_BRIDGE_STUB = """import json, sys
+TOOLS = [
+ {"name": "bash", "description": "Run.", "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}}}},
+ {"name": "write", "description": "Write.", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}},
+ {"name": "edit", "description": "Edit.", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}}}},
+ {"name": "read", "description": "Read.", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}, "annotations": {"readOnlyHint": True}},
+]
+def send(m):
+    sys.stdout.write(json.dumps(m) + "\\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    mid = req.get("id")
+    method = req.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": req["params"]["protocolVersion"], "capabilities": {"tools": {}}, "serverInfo": {"name": "b", "version": "1.0"}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"tools": TOOLS}})
+    elif method == "tools/call":
+        name = (req.get("params") or {}).get("name", "")
+        send({"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": "stub-" + name}]}})
+    else:
+        send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "nope"}})
+"""
+
+
+def _bridge_fixture(tmp_path, monkeypatch):
+    from chad import mcp
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    mcp.reset_session()
+    return mcp
+
+
+def _write_bridge_stub(tmp_path):
+    path = tmp_path / "bridge_stub.py"
+    path.write_text(_BRIDGE_STUB)
+    return path
+
+
+def _overlay_on(mcp, tmp_path, server="bridge"):
+    import sys as _sys
+    stub = _write_bridge_stub(tmp_path)
+    warnings = mcp.set_client_servers(
+        str(tmp_path), [(server, {"command": _sys.executable,
+                                  "args": [str(stub)]})])
+    assert warnings == []
+    from chad import tools as _tools
+    _tools.set_name_overlay({
+        "bash": "mcp__" + server + "__bash",
+        "write": "mcp__" + server + "__write",
+        "edit": "mcp__" + server + "__edit",
+        "read": "mcp__" + server + "__read",
+    })
+
+
+def _overlay_off(tmp_path):
+    from chad import mcp as _mcp
+    from chad import tools as _tools
+    _tools.set_name_overlay({})
+    _mcp.set_client_servers(str(tmp_path), [])
+    _mcp.reset_session()
+
+
+def test_overlay_renames_and_hides(tmp_path, monkeypatch):
+    from chad import tools as _tools
+    mcp = _bridge_fixture(tmp_path, monkeypatch)
+    try:
+        _overlay_on(mcp, tmp_path)
+        names = [s["function"]["name"] for s in _tools.active_schemas()]
+        assert "bash" in names and "write" in names
+        assert "edit" in names and "read" in names
+        assert "mcp__bridge__bash" not in names
+        params = [s for s in _tools.active_schemas()
+                  if s["function"]["name"] == "bash"][0]["function"]["parameters"]
+        assert params["properties"]["command"]["type"] == "string"
+    finally:
+        _overlay_off(tmp_path)
+
+
+def test_overlay_dispatch_and_mutating(tmp_path, monkeypatch):
+    from chad import tools as _tools
+    mcp = _bridge_fixture(tmp_path, monkeypatch)
+    try:
+        _overlay_on(mcp, tmp_path)
+        assert _tools.resolve_overlay("bash") == "mcp__bridge__bash"
+        assert _tools.resolve_overlay("done") == "done"
+        assert _tools.is_overlay("edit") is True
+        assert _tools.is_overlay("bash") is True
+        assert _tools.is_mutating("bash") is True
+        assert _tools.is_mutating("read") is False
+        fn = _tools.dispatch_for("bash")
+        assert fn is not None
+        assert fn({"command": "ls"}) == "stub-bash"
+        assert _tools.dispatch_for("read")({"path": "x"}) == "stub-read"
+    finally:
+        _overlay_off(tmp_path)
+
+
+def test_overlay_missing_target_fails_closed(tmp_path, monkeypatch):
+    from chad import tools as _tools
+    _bridge_fixture(tmp_path, monkeypatch)
+    try:
+        _tools.set_name_overlay({"bash": "mcp__ghost__bash"})
+        names = [s["function"]["name"] for s in _tools.active_schemas()]
+        assert "bash" not in names
+        assert _tools.dispatch_for("bash") is None
+    finally:
+        _overlay_off(tmp_path)
+
+
+def test_alias_prefers_overlay_read(tmp_path, monkeypatch):
+    from chad import tools as _tools
+    mcp = _bridge_fixture(tmp_path, monkeypatch)
+    try:
+        _overlay_on(mcp, tmp_path)
+        assert _tools.alias_to_bash("view", {"path": "a.py"}) == (
+            "read", {"path": "a.py"})
+        assert _tools.alias_to_bash(
+            "view", {"path": "a.py", "offset": 3, "limit": 5}) == (
+            "read", {"path": "a.py", "offset": 3, "limit": 5})
+    finally:
+        _overlay_off(tmp_path)

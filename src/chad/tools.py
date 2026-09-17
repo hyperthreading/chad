@@ -885,6 +885,18 @@ def alias_to_bash(name: str, args):
     start = _int("offset", "start", "start_line", "from_line", "line")
     limit = _int("limit", "count", "num_lines", "n")
     end = _int("end", "end_line", "to_line")
+    if _name_overlay.get("read") and dispatch_for("read") is not None:
+        # A bridged `read` exists: prefer it over a shell rewrite so the model
+        # gets numbered lines back directly (no-op without --no-builtins).
+        read_args = {"path": path}
+        if start is not None:
+            read_args["offset"] = start
+            span = (end - start + 1) if end is not None else limit
+            if span is not None:
+                read_args["limit"] = span
+        elif limit:
+            read_args["limit"] = limit
+        return "read", read_args
     if start is not None:
         start = max(1, start)
         if end is None:
@@ -1059,6 +1071,29 @@ def active_schemas():
     mcp_schemas = _mcp().schemas()
     if mcp_schemas:
         schemas = schemas + mcp_schemas
+    if _name_overlay:
+        hidden = set(_name_overlay.keys()) | set(_name_overlay.values())
+        by_name = {}
+        for s in schemas:
+            by_name[s["function"]["name"]] = s
+        renamed: list[ToolSchema] = []
+        for s in schemas:
+            if s["function"]["name"] not in hidden:
+                renamed.append(s)
+        for bare, target in _name_overlay.items():
+            original = by_name.get(target)
+            if original is None:
+                continue
+            fn = original["function"]
+            renamed.append({
+                "type": "function",
+                "function": {
+                    "name": bare,
+                    "description": fn["description"],
+                    "parameters": fn["parameters"],
+                },
+            })
+        return renamed
     return schemas
 
 
@@ -1072,6 +1107,11 @@ def dispatch_for(name):
     """Return the callable (args, should_stop)->str that handles a tool call, checking
     chad's builtin DISPATCH first and then connected MCP servers. None if the name is
     not a known tool (the agent then runs the unknown-tool repair path)."""
+    target = _name_overlay.get(name)
+    if target is not None:
+        if target != name and _mcp().is_mcp_tool(target) and _mcp().has_tool(target):
+            return lambda a, ss=None: _mcp().call(target, a)
+        return None
     fn = DISPATCH.get(name)
     if fn is not None:
         return fn
@@ -1083,4 +1123,30 @@ def dispatch_for(name):
 def is_mutating(name) -> bool:
     """Whether a tool call needs the confirmation gate: a builtin mutator, or an MCP
     tool the server didn't mark read-only (see mcp._is_mutating)."""
+    target = _name_overlay.get(name)
+    if target is not None:
+        return _mcp().is_mutating(target)
     return name in MUTATING or _mcp().is_mutating(name)
+
+
+# Bare-name overlay for MCP tools (remote bridge: `chad acp --no-builtins {server}`
+# presents that server's tools under builtin names so the model keeps its trained
+# vocabulary). Empty by default. Validation reads live schemas, so renamed entries
+# stay coherent with no other changes; dispatch and mutating checks consult the map.
+_name_overlay: dict[str, str] = {}
+
+
+def set_name_overlay(mapping: dict[str, str]) -> None:
+    """Replace the bare-name to MCP tool overlay (empty clears)."""
+    global _name_overlay
+    _name_overlay = dict(mapping)
+
+
+def resolve_overlay(name: str) -> str:
+    """Map a model-emitted name to its overlay target, or itself when none."""
+    return _name_overlay.get(name, name)
+
+
+def is_overlay(name: str) -> bool:
+    """Whether a model-emitted name is overlaid onto an MCP tool."""
+    return name in _name_overlay

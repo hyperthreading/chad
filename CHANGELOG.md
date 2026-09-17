@@ -4,6 +4,25 @@ Notable, user-visible changes.
 
 ## [Unreleased]
 
+**`chad acp-bridge`: run the brain remotely, keep the files local.** A new
+`chad acp-bridge` relay lets Zed drive a full chad (harness plus MLX
+engine, in-process) on a remote Apple Silicon Mac over one ssh connection:
+prompts cross as ACP turns while `read`/`write`/`edit`/`bash` execute
+locally through Zed's `fs`/`terminal` capabilities (local execution
+fallback included), served back over a forwarded MCP endpoint.
+`chad acp --no-builtins {server}` presents that server's tools under the
+bare builtin names so the model keeps its vocabulary; permission relays
+allow-once only, paths stay inside the session workspace, and Zed
+command-type MCP servers never cross. The same change pins every ACP
+prompt to one worker thread (the MLX engine binds streams to its first
+thread; a fresh thread per prompt crashed the second turn live) and pushes
+the session mode to the remote on open. Live-verified over an ssh loopback
+with the real weights through the official TypeScript client: enumerate,
+read, multi-permission bash and write, and cancel. Covered by
+`tests/test_acp.py`, `tests/test_acp_bridge.py`,
+`tests/test_bridge_mcp.py` and `tests/acp_client/run-bridge.mjs`
+(`npm run test:bridge`); setup in `docs/acp.md`.
+
 **`chad acp`: drive chad from Zed over Agent Client Protocol v1.** A new
 long-lived stdio subcommand speaks ACP (`initialize`, `session/new`,
 `session/prompt`, `session/cancel`, `session/set_mode`) so Zed custom agent

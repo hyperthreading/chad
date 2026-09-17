@@ -5,7 +5,8 @@
   "description": "Official-client conformance harness for chad acp (ACP v1).",
   "type": "module",
   "scripts": {
-    "test": "node run.mjs"
+    "test": "node run.mjs",
+    "test:bridge": "node run-bridge.mjs"
   },
   "dependencies": {
     "@zed-industries/agent-client-protocol": "0.4.5"
